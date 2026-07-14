@@ -31,7 +31,7 @@
 -->
 <project name="minidrone" id="2">
 	All MiniDrone-only commands
-	<class name="Piloting" id="0">
+	<myclass name="Piloting" id="0">
 		All commands related to piloting the MiniDrone
 		<cmd name="FlatTrim" id="0">
 			Do a flat trim
@@ -106,8 +106,8 @@
 			Command to toggle between "easy" piloting mode and "preferred" piloting mode.
 			This command only works while the drone is flying.
 		</cmd>
-	</class>
-	<class name="PilotingState" id="3">
+	</myclass>
+	<myclass name="PilotingState" id="3">
 		Occasional information
 		<cmd name="FlatTrimChanged" id="0">
 			MiniDrone send flat trim was correctly processed
@@ -226,8 +226,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="Animations" id="4">
+	</myclass>
+	<myclass name="Animations" id="4">
 		Animation commands
 		<cmd name="Flip" id="0">
 			Make a flip
@@ -253,8 +253,8 @@
 				Change the cap with offset angle [-180;180]
 			</arg>
 		</cmd>
-	</class>
-	<class name="MediaRecord" id="6">
+	</myclass>
+	<myclass name="MediaRecord" id="6">
 		Media recording management
 		<cmd name="Picture" id="0">
 			@deprecated
@@ -266,8 +266,8 @@
 		<cmd name="PictureV2" id="1">
 			Take picture
 		</cmd>
-	</class>
-	<class name="MediaRecordState" id="7">
+	</myclass>
+	<myclass name="MediaRecordState" id="7">
 		State of media recording
 		<cmd name="PictureStateChanged" id="0">
 			@deprecated
@@ -312,8 +312,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="MediaRecordEvent" id="2">
+	</myclass>
+	<myclass name="MediaRecordEvent" id="2">
 		Events of media recording
 		<cmd name="PictureEventChanged" id="0" content="NOTIFICATION">
 			Event of picture recording
@@ -348,8 +348,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="PilotingSettings" id="8">
+	</myclass>
+	<myclass name="PilotingSettings" id="8">
 		Piloting Settings commands
 		<cmd name="MaxAltitude" id="0">
 			Set Max Altitude
@@ -414,8 +414,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="PilotingSettingsState" id="9">
+	</myclass>
+	<myclass name="PilotingSettingsState" id="9">
 		Piloting Settings state from product
 		<cmd name="MaxAltitudeChanged" id="0">
 			Max Altitude sent by product
@@ -485,8 +485,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="SpeedSettings" id="1">
+	</myclass>
+	<myclass name="SpeedSettings" id="1">
 		Speed Settings commands
 		<cmd name="MaxVerticalSpeed" id="0">
 			Set Max Vertical speed
@@ -518,8 +518,8 @@
 				Current max plane mode rotation speed in degree/s
 			</arg>
 		</cmd>
-	</class>
-	<class name="SpeedSettingsState" id="5">
+	</myclass>
+	<myclass name="SpeedSettingsState" id="5">
 		Speed Settings state from product
 		<cmd name="MaxVerticalSpeedChanged" id="0">
 			Max vertical speed sent by product
@@ -575,8 +575,8 @@
 				Range max of plane mode rotation speed
 			</arg>
 		</cmd>
-	</class>
-	<class name="Settings" id="10">
+	</myclass>
+	<myclass name="Settings" id="10">
 		Settings commands
 		<cmd name="CutOutMode" id="0">
 			Set MiniDrone cut out mode
@@ -584,8 +584,8 @@
 				Enable cut out mode (1 if is activate, 0 otherwise)
 			</arg>
 		</cmd>
-	</class>
-	<class name="SettingsState" id="11">
+	</myclass>
+	<myclass name="SettingsState" id="11">
 		Settings state from product
 		<cmd name="ProductMotorsVersionChanged" id="0">
 			@deprecated
@@ -619,8 +619,8 @@
 				State of cut out mode (1 if is activate, 0 otherwise)
 			</arg>
 		</cmd>
-	</class>
-	<class name="FloodControlState" id="12">
+	</myclass>
+	<myclass name="FloodControlState" id="12">
 		Settings state from product
 		<cmd name="FloodControlChanged" id="0">
 			@deprecated
@@ -629,8 +629,8 @@
 				Delay (in ms) between two PCMD
 			</arg>
 		</cmd>
-	</class>
-	<class name="GPS" id="13">
+	</myclass>
+	<myclass name="GPS" id="13">
 		GPS related commands
 		<cmd name="ControllerLatitudeForRun" id="0">
 			Set the controller latitude for a run.
@@ -644,8 +644,8 @@
 				Controller longitude in decimal degrees
 			</arg>
 		</cmd>
-	</class>
-	<class name="Configuration" id="14">
+	</myclass>
+	<myclass name="Configuration" id="14">
 		Configuration related commands
 		<cmd name="ControllerType" id="0">
 			Set the controller type.
@@ -659,8 +659,8 @@
 				Controller name like com.parrot.freeflight3
 			</arg>
 		</cmd>
-	</class>
-	<class name="UsbAccessoryState" id="15">
+	</myclass>
+	<myclass name="UsbAccessoryState" id="15">
 		USB Accessories state commands.
 		<cmd name="LightState" id="0" type="MAP_ITEM">
 			USB Light accessory state cmd.
@@ -741,8 +741,8 @@
 				0x08: Remove: This value should be removed from the existing list.
 			</arg>
 		</cmd>
-	</class>
-	<class name="UsbAccessory" id="16">
+	</myclass>
+	<myclass name="UsbAccessory" id="16">
 		USB Accessories control commands.
 		<cmd name="LightControl" id="0">
 			USB Light control cmd.
@@ -793,8 +793,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="RemoteController" id="17">
+	</myclass>
+	<myclass name="RemoteController" id="17">
 		Remote controller related commands.
 		<cmd name="SetPairedRemote" id="0">
 			Send the address of the remote controller on which the drone should be paired
@@ -823,8 +823,8 @@
 				1 to enable, 0 to disable.
 			</arg>
 		</cmd>
-	</class>
-	<class name="NavigationDataState" id="18">
+	</myclass>
+	<myclass name="NavigationDataState" id="18">
 		Navigation Data.
 		<cmd name="DronePosition" id="0">
 			Get the drone position from takeoff point (0, 0, 0, 0).
@@ -897,8 +897,8 @@
 				Acquisition timestamp (ms).
 			</arg>
 		</cmd>
-	</class>
-	<class name="MinicamState" id="19">
+	</myclass>
+	<myclass name="MinicamState" id="19">
 		Minicam related events.
 		<cmd name="PowerModeChanged" id="0">
 			Event informing about the minicam power mode.
@@ -1036,8 +1036,8 @@
 				1 if Mass Storage has been formatted, 0 otherwise.
 			</arg>
 		</cmd>
-	</class>
-	<class name="VideoSettings" id="20">
+	</myclass>
+	<myclass name="VideoSettings" id="20">
 		Video settings.
 		<cmd name="Autorecord" id="0">
 			Set video automatic recording state.
@@ -1073,8 +1073,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="VideoSettingsState" id="21">
+	</myclass>
+	<myclass name="VideoSettingsState" id="21">
 		Video settings state.
 		<cmd name="AutorecordChanged" id="0">
 			Event informing about the video automatic recording status.
@@ -1110,8 +1110,8 @@
 				</enum>
 			</arg>
 		</cmd>
-	</class>
-	<class name="Minicam" id="24">
+	</myclass>
+	<myclass name="Minicam" id="24">
 		Minicam related commands.
 		<cmd name="Picture" id="0">
 			Take picture.
@@ -1131,8 +1131,8 @@
 		<cmd name="MassStorageFormat" id="2">
 			Format mass storage.
 		</cmd>
-	</class>
-	<class name="RemoteControllerState" id="25">
+	</myclass>
+	<myclass name="RemoteControllerState" id="25">
 		State changes related to the remote controller.
 		<cmd name="ConnectionChanged" id="0">
 			State of the connection to the remote controller changed.
@@ -1207,5 +1207,5 @@
 				known yet.
 			</arg>
 		</cmd>
-	</class>
+	</myclass>
 </project>

@@ -71,16 +71,22 @@ setup(
     packages=find_packages(exclude=['contrib', 'docs', 'tests', 'coursework']),
     include_package_data=True,
 
-    # Dependencies for BLE (Mambo/Swing) use.
+    # Dependencies. All pinned to the exact versions verified with real
+    # Mambo flights (Windows 11, Python 3.14, July 2026). Re-run a full
+    # takeoff/land test before loosening any pin.
     #
-    # bleak is pinned to the EXACT version tested with real Mambo flights
-    # (Windows 11, Python 3.14, July 2026). bleak has changed its
-    # notification-callback API before (0.19), so do not loosen this pin
-    # casually -- if you upgrade bleak, re-run a full takeoff/land test
-    # before using it in class.
+    # - bleak: BLE library. Changed its notification-callback API before
+    #   (0.19), so upgrades are risky without a flight test.
+    # - untangle: XML parser for the drone command files. Its handling of
+    #   the reserved element name <class> changed across versions; our XML
+    #   files use <myclass> (matching pyparrot's code), which parses
+    #   identically on every untangle version, but we pin for repeatability.
+    # - zeroconf: only used by the WiFi connection, but Minidrone.py imports
+    #   it unconditionally, so it's required even for BLE-only use.
     install_requires=[
-        'untangle',
+        'untangle==1.2.1',
         'bleak==3.0.2',
+        'zeroconf==0.150.0',
     ],
 
     # bleak requires modern Python; 3.9+ keeps us comfortably compatible.

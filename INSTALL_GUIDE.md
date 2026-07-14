@@ -44,28 +44,34 @@ and Linux.
 
 ---
 
-## 3. Install the drone software
+## 3. Install the drone software (one command)
 
-1. Download this package (green **Code** button → **Download ZIP** on the
-   GitHub page) and unzip it somewhere easy, for example:
+Open **PowerShell** and run:
 
-   ```
-   C:\Users\<you>\Documents\pyparrot-windows
-   ```
+```
+pip install https://github.com/DAUST-CRAS/pyparrot_windows/archive/refs/tags/v2.0.0-windows.zip
+```
 
-2. Open PowerShell **in that folder**: in File Explorer, open the folder,
-   click the address bar, type `powershell`, and press Enter.
+This installs the drone library (`pyparrot`) plus everything it needs
+(`bleak` for Bluetooth, `untangle` for drone commands). No Git required,
+no compilers, no drivers, no admin rights.
 
-3. Install the required Python packages:
+To verify it worked:
 
-   ```
-   pip install bleak untangle
-   ```
+```
+python -c "import pyparrot; print('pyparrot OK')"
+```
 
-   - `bleak` = the cross-platform Bluetooth library
-   - `untangle` = XML parser pyparrot needs for drone commands
+You also need the example flight script. Your instructor will give you
+`demoMamboDirectFlight.py` (USB stick or shared drive), or you can download
+it from the GitHub page: open `examples/demoMamboDirectFlight.py`, click
+**Raw**, then press Ctrl+S to save it into a folder like
+`C:\Users\<you>\Documents\drone-camp`.
 
-That's it — no compilers, no drivers, no admin rights needed.
+> **Important:** run your scripts from a plain folder like `drone-camp` —
+> NOT from inside a downloaded copy of the pyparrot source code. If your
+> script's folder contains a `pyparrot` subfolder, Python will use that
+> copy instead of the one you just installed.
 
 ---
 
@@ -86,10 +92,11 @@ That's it — no compilers, no drivers, no admin rights needed.
 Every drone has a unique address that looks like `D0:3A:60:8B:E6:5A`.
 You need it once per drone — write it on a sticker on the drone!
 
-With the drone powered on, run the scanner from the package folder:
+With the drone powered on, run the scanner (installed automatically in
+step 3 — works from any folder):
 
 ```
-python find_mambo.py
+find_mambo
 ```
 
 Expected output:
@@ -116,8 +123,8 @@ Copy the address exactly, including the colons.
 
 ## 6. First test flight
 
-1. Open `examples/demoMamboDirectFlight.py` in a text editor
-   (Notepad, VS Code, ...).
+1. Open `demoMamboDirectFlight.py` (in your `drone-camp` folder) in a text
+   editor (Notepad, VS Code, ...).
 2. Replace the address at the top with YOUR drone's address:
 
    ```python
@@ -125,10 +132,11 @@ Copy the address exactly, including the colons.
    ```
 
 3. Put the drone on the floor, in a clear space, propeller guards ON.
-4. Run it:
+4. In PowerShell, go to your folder and run it:
 
    ```
-   python examples/demoMamboDirectFlight.py
+   cd C:\Users\<you>\Documents\drone-camp
+   python demoMamboDirectFlight.py
    ```
 
 The drone should take off, hover, drift forward gently, and land.
@@ -159,7 +167,9 @@ Troubleshooting below.
 | Symptom | Fix |
 |---|---|
 | `'python' is not recognized` | Reinstall Python with "Add to PATH" ticked, then close and reopen PowerShell. |
-| `ModuleNotFoundError: No module named 'bleak'` | Run `pip install bleak untangle` again in the same PowerShell where you run the scripts. |
+| `ModuleNotFoundError: No module named 'bleak'` (or 'pyparrot') | Re-run the install command from section 3 in the same PowerShell where you run the scripts. |
+| `ModuleNotFoundError: No module named 'zeroconf'` | You installed an old version of this package. Re-run the install command from section 3 (v2.0.0-windows or later includes it automatically). |
+| `AttributeError: 'project' has no attribute 'myclass'` | Old/broken XML command files. Re-run the install command from section 3 with `--force-reinstall` added at the end. |
 | Scanner finds nothing | Battery in and charged? Phone app closed? Bluetooth on? Drone within 2 m? |
 | `Connected: False` after 3 tries | Power-cycle the drone (remove/reinsert battery), wait 10 s, retry. Make sure no phone is connected. |
 | `handshake notify failed for ...fd24 / ...fd54` | **Harmless.** These are camera/file-transfer channels Windows can't subscribe to. Flight is unaffected. |
