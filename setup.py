@@ -137,7 +137,7 @@ setup(
     #
     # For an analysis of "install_requires" vs pip's requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    install_requires=['untangle'],  # Optional
+    install_requires=['untangle', 'bleak'],  # Optional
 
     # this only runs on python 3
     python_requires='>=3',

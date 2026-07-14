@@ -1,4 +1,29 @@
 # pyparrot
+
+# pyparrot_windows — Windows/macOS BLE fork
+
+This is a fork of [pyparrot](https://github.com/amymcgovern/pyparrot) by
+Dr. Amy McGovern (MIT License) that adds **Bluetooth (BLE) support on
+Windows and macOS** for the Parrot Mambo and other minidrones. The original
+BLE code required Linux (`bluepy`); this fork replaces it with
+[bleak](https://github.com/hbldh/bleak), a cross-platform BLE library.
+
+**Changes vs. upstream:**
+- `pyparrot/networking/bleConnection.py` rewritten on bleak (same public
+  API, same packet formats — no other pyparrot files were modified)
+- Fixes for bleak ≥ 0.19 notification callbacks, a notification-thread
+  deadlock, bounded write retries, and re-subscription after reconnect
+- `find_mambo.py` — scan for your drone's BLE address on any OS
+- `INSTALL_GUIDE.md` — step-by-step setup for classrooms/camps
+
+**Quick start (Windows):** see [INSTALL_GUIDE.md](INSTALL_GUIDE.md)
+
+Maintained by DAUST-CRAS for drone-programming summer camps.
+Everything below is the original upstream README.
+
+---
+
+
 Python interface for Parrot Drones
 
 pyparrot was designed and implemented by Dr. Amy McGovern to program Parrot Mambo and Parrot Bebop 2

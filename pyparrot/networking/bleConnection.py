@@ -1,69 +1,172 @@
-from bluepy.btle import Peripheral, UUID, DefaultDelegate, BTLEException
-from pyparrot.utils.colorPrint import color_print
+"""
+bleConnection.py  (Windows/Mac/Linux compatible version -- FIXED)
+
+Drop-in replacement for pyparrot's pyparrot/networking/bleConnection.py,
+built on bleak instead of bluepy.
+
+FIXES in this version (vs. the previous bleak port):
+
+  FIX 1 (the landing bug): in bleak >= 0.19, notification callbacks receive
+         a BleakGATTCharacteristic OBJECT as `sender`, not a UUID string.
+         str(sender) looks like:
+             "9a66fb0e-...-cb8e (Handle: 187): Unknown"
+         which never matched the UUID keys in uuid_to_channel, so EVERY
+         notification hit the "unknown channel" branch. Result: no ACKs, no
+         sensor updates, flying_state never changed, and safe_land() had
+         nothing to key off of. We now read sender.uuid.
+
+  FIX 2: _safe_ble_write() used to loop FOREVER on write failure, which
+         could hang the landing loop with the drone still in the air. It is
+         now bounded and returns True/False.
+
+  FIX 3: _reconnect() re-authenticates the handshake but never re-subscribed
+         to the four receive characteristics, so after any mid-flight
+         reconnect you'd lose ACKs/sensors even with FIX 1. It now re-runs
+         start_notify() on all receive channels.
+
+  FIX 4 (the deadlock exposed by FIX 1): bleak runs notification callbacks
+         on its event-loop thread. pyparrot reacts to ACK_DRONE_DATA by
+         writing an ack packet back to the drone; a blocking BLE write from
+         the loop thread deadlocks the loop and every write times out with
+         an empty "()" error. Notifications are now queued and dispatched
+         into pyparrot from a dedicated worker thread, and
+         _BleakEventLoopThread.run() refuses (loudly) to be called from the
+         loop thread so this class of bug can't silently return.
+
+INSTALL:
+    pip install bleak
+
+USAGE: same as before -- copy over pyparrot/networking/bleConnection.py.
+"""
+
+import asyncio
+import queue
 import struct
+import threading
 import time
-from pyparrot.commandsandsensors.DroneSensorParser import get_data_format_and_size
 from datetime import datetime
 
-class MinidroneDelegate(DefaultDelegate):
+from bleak import BleakClient, BleakScanner
+from pyparrot.utils.colorPrint import color_print
+from pyparrot.commandsandsensors.DroneSensorParser import get_data_format_and_size
+
+
+class _BleakEventLoopThread:
     """
-    Handle BLE notififications
+    Runs a single asyncio event loop forever in a background daemon thread,
+    so synchronous pyparrot code can call bleak's async API and block for
+    the result, the same way it used to block on bluepy calls.
     """
-    def __init__(self, handle_map, minidrone, ble_connection):
-        DefaultDelegate.__init__(self)
-        self.handle_map = handle_map
+    _loop = None
+    _thread = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_loop(cls):
+        with cls._lock:
+            if cls._loop is None:
+                cls._loop = asyncio.new_event_loop()
+                cls._thread = threading.Thread(target=cls._loop.run_forever, daemon=True)
+                cls._thread.start()
+            return cls._loop
+
+    @classmethod
+    def run(cls, coro, timeout=None):
+        loop = cls.get_loop()
+        # FIX 4 (guard): calling future.result() FROM the event-loop thread
+        # deadlocks the loop (the coroutine can never be scheduled while we
+        # block). This happened when bleak notification callbacks (which run
+        # on the loop thread) triggered pyparrot's ack_packet() -> BLE write.
+        # Fail loudly instead of freezing for the timeout duration.
+        if threading.current_thread() is cls._thread:
+            raise RuntimeError(
+                "BLE call attempted from the event-loop thread itself; "
+                "this would deadlock. Dispatch to a worker thread instead."
+            )
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout)
+
+
+class MinidroneNotifyHandler:
+    """
+    Equivalent of the original bluepy MinidroneDelegate, adapted to bleak's
+    notification callback style: callback(sender, data).
+
+    FIX 4 (the deadlock): bleak invokes this callback ON the background
+    event-loop thread. pyparrot's update_sensors() reacts to ACK_DRONE_DATA
+    by sending an ack packet back to the drone -- i.e. a BLE write -- and a
+    blocking BLE write from the event-loop thread deadlocks the loop (it
+    waits on a coroutine that can only run on the thread that's waiting).
+    That's what produced the silent 5-second "BLE write failed on attempt 1 ()"
+    TimeoutErrors as soon as sensor notifications started flowing.
+
+    So the callback itself now does the bare minimum -- copy the data and put
+    it on a queue -- and a dedicated worker thread does the actual dispatch
+    into pyparrot. A single ordered worker preserves packet ordering, which
+    matters for the sequence-number logic in update_sensors().
+    """
+    def __init__(self, uuid_to_channel, minidrone, ble_connection):
+        self.uuid_to_channel = uuid_to_channel
         self.minidrone = minidrone
         self.ble_connection = ble_connection
-        color_print("initializing notification delegate", "INFO")
+        self._queue = queue.Queue()
+        self._worker = threading.Thread(target=self._process_forever, daemon=True)
+        self._worker.start()
 
-    def handleNotification(self, cHandle, data):
-        #print "handling notificiation from channel %d" % cHandle
-        #print "handle map is %s " % self.handle_map[cHandle]
-        #print "channel map is %s " % self.minidrone.characteristic_receive_uuids[self.handle_map[cHandle]]
-        #print "data is %s " % data
+    def __call__(self, sender, data):
+        # Runs on the bleak event-loop thread: do NOTHING blocking here.
+        # FIX 1: bleak >= 0.19 passes a BleakGATTCharacteristic object whose
+        # str() is "uuid (Handle: N): Description"; use .uuid when present.
+        uuid = getattr(sender, "uuid", sender)
+        self._queue.put((str(uuid).lower(), bytes(data)))
 
-        channel = self.ble_connection.characteristic_receive_uuids[self.handle_map[cHandle]]
+    def _process_forever(self):
+        # Runs on its own thread, so BLE writes triggered from here (like
+        # pyparrot's ack_packet) block safely without freezing the loop.
+        while True:
+            sender_key, data = self._queue.get()
+            try:
+                self._dispatch(sender_key, data)
+            except Exception as e:
+                color_print("error handling notification from %s: %r" % (sender_key, e), "ERROR")
+
+    def _dispatch(self, sender_key, data):
+        channel = self.uuid_to_channel.get(sender_key)
+
+        if channel is None:
+            color_print("unknown channel for sender %s" % sender_key, "ERROR")
+            return
 
         (packet_type, packet_seq_num) = struct.unpack('<BB', data[0:2])
         raw_data = data[2:]
 
         if channel == 'ACK_DRONE_DATA':
-            # data received from drone (needs to be ack on 1e)
-            #color_print("calling update sensors ack true", "WARN")
             self.minidrone.update_sensors(packet_type, None, packet_seq_num, raw_data, ack=True)
         elif channel == 'NO_ACK_DRONE_DATA':
-            # data from drone (including battery and others), no ack
-            #color_print("drone data - no ack needed")
             self.minidrone.update_sensors(packet_type, None, packet_seq_num, raw_data, ack=False)
         elif channel == 'ACK_COMMAND_SENT':
-            # ack 0b channel, SEND_WITH_ACK
-            #color_print("Ack!  command received!")
             self.ble_connection._set_command_received('SEND_WITH_ACK', True)
         elif channel == 'ACK_HIGH_PRIORITY':
-            # ack 0c channel, SEND_HIGH_PRIORITY
-            #color_print("Ack!  high priority received")
             self.ble_connection._set_command_received('SEND_HIGH_PRIORITY', True)
         else:
-            color_print("unknown channel %s sending data " % channel, "ERROR")
-            color_print(cHandle)
+            color_print("unknown channel %s sending data" % channel, "ERROR")
 
 
 class BLEConnection:
+    """
+    Same public interface as the original bluepy-based BLEConnection class,
+    reimplemented on top of bleak so it runs on Windows, macOS, and Linux.
+    """
+
     def __init__(self, address, minidrone):
         """
-             Initialize with its BLE address - if you don't know the address, call findMinidrone
-             and that will discover it for you.
-
-             :param address: unique address for this minidrone
-             :param minidrone: the Minidrone object for this minidrone (needed for callbacks for sensors)
-             """
+        :param address: BLE address for the minidrone (see scan_for_minidrones())
+        :param minidrone: the Minidrone object for this drone (used for sensor callbacks)
+        """
         self.address = address
-        self.drone_connection = Peripheral()
         self.minidrone = minidrone
+        self.client = None  # bleak.BleakClient, created in connect()
 
-        # the following UUID segments come from the Minidrone and from the documenation at
-        # http://forum.developer.parrot.com/t/minidrone-characteristics-uuid/4686/3
-        # the 3rd and 4th bytes are used to identify the service
         self.service_uuids = {
             'fa00': 'ARCOMMAND_SENDING_SERVICE',
             'fb00': 'ARCOMMAND_RECEIVING_SERVICE',
@@ -74,19 +177,14 @@ class BLEConnection:
             '1800': 'Device Info',
             '1801': 'unknown',
         }
-        # the following characteristic UUID segments come from the documentation at
-        # http://forum.developer.parrot.com/t/minidrone-characteristics-uuid/4686/3
-        # the 4th bytes are used to identify the characteristic
-        # the usage of the channels are also documented here
-        # http://forum.developer.parrot.com/t/ble-characteristics-of-minidrones/5912/2
+
         self.characteristic_send_uuids = {
-            '0a': 'SEND_NO_ACK',  # not-ack commandsandsensors (PCMD only)
-            '0b': 'SEND_WITH_ACK',  # ack commandsandsensors (all piloting commandsandsensors)
-            '0c': 'SEND_HIGH_PRIORITY',  # emergency commandsandsensors
-            '1e': 'ACK_COMMAND'  # ack for data sent on 0e
+            '0a': 'SEND_NO_ACK',
+            '0b': 'SEND_WITH_ACK',
+            '0c': 'SEND_HIGH_PRIORITY',
+            '1e': 'ACK_COMMAND'
         }
 
-        # counters for each packet (required as part of the packet)
         self.characteristic_send_counter = {
             'SEND_NO_ACK': 0,
             'SEND_WITH_ACK': 0,
@@ -95,21 +193,13 @@ class BLEConnection:
             'RECEIVE_WITH_ACK': 0
         }
 
-        # the following characteristic UUID segments come from the documentation at
-        # http://forum.developer.parrot.com/t/minidrone-characteristics-uuid/4686/3
-        # the 4th bytes are used to identify the characteristic
-        # the types of commandsandsensors and data coming back are also documented here
-        # http://forum.developer.parrot.com/t/ble-characteristics-of-minidrones/5912/2
         self.characteristic_receive_uuids = {
-            '0e': 'ACK_DRONE_DATA',  # drone data that needs an ack (needs to be ack on 1e)
-            '0f': 'NO_ACK_DRONE_DATA',  # data from drone (including battery and others), no ack
-            '1b': 'ACK_COMMAND_SENT',  # ack 0b channel, SEND_WITH_ACK
-            '1c': 'ACK_HIGH_PRIORITY',  # ack 0c channel, SEND_HIGH_PRIORITY
+            '0e': 'ACK_DRONE_DATA',
+            '0f': 'NO_ACK_DRONE_DATA',
+            '1b': 'ACK_COMMAND_SENT',
+            '1c': 'ACK_HIGH_PRIORITY',
         }
 
-        # these are the FTP incoming and outcoming channels
-        # the handling characteristic seems to be the one to send commandsandsensors to (per the SDK)
-        # information gained from reading ARUTILS_BLEFtp.m in the SDK
         self.characteristic_ftp_uuids = {
             '22': 'NORMAL_FTP_TRANSFERRING',
             '23': 'NORMAL_FTP_GETTING',
@@ -119,18 +209,22 @@ class BLEConnection:
             '54': 'UPDATE_FTP_HANDLING',
         }
 
-        # FTP commandsandsensors (obtained via ARUTILS_BLEFtp.m in the SDK)
         self.ftp_commands = {
             "list": "LIS",
             "get": "GET"
         }
 
-        # need to save for communication (but they are initialized in connect)
         self.services = None
-        self.send_characteristics = dict()
-        self.receive_characteristics = dict()
-        self.handshake_characteristics = dict()
+        self.send_characteristics = dict()       # channel name -> characteristic uuid (str)
+        self.receive_characteristics = dict()    # channel name -> characteristic uuid (str)
+        self.handshake_characteristics = dict()  # short hex id -> characteristic uuid (str)
         self.ftp_characteristics = dict()
+
+        # reverse lookup used by the notification handler
+        self.uuid_to_receive_channel = dict()
+
+        # kept so _reconnect() can re-subscribe with the same handler (FIX 3)
+        self._notify_handler = None
 
         self.data_types = {
             'ACK': 1,
@@ -139,372 +233,304 @@ class BLEConnection:
             'DATA_WITH_ACK': 4
         }
 
-        # store whether a command was acked
         self.command_received = {
             'SEND_WITH_ACK': False,
             'SEND_HIGH_PRIORITY': False,
             'ACK_COMMAND': False
         }
 
-        # instead of parsing the XML file every time, cache the results
         self.command_tuple_cache = dict()
         self.sensor_tuple_cache = dict()
 
-        # maximum number of times to try a packet before assuming it failed
         self.max_packet_retries = 3
+
+    # ---------------------------------------------------------------
+    # connection management
+    # ---------------------------------------------------------------
 
     def connect(self, num_retries):
         """
-        Connects to the drone and re-tries in case of failure the specified number of times
-
-        :param: num_retries is the number of times to retry
-
-        :return: True if it succeeds and False otherwise
+        Connects to the drone and re-tries in case of failure the specified number of times.
+        :param num_retries: number of times to retry
+        :return: True if it succeeds, False otherwise
         """
-
-        # first try to connect to the wifi
+        import traceback
         try_num = 1
         connected = False
-        while (try_num < num_retries and not connected):
+        while try_num < num_retries and not connected:
             try:
                 self._connect()
                 connected = True
-            except BTLEException:
-                color_print("retrying connections", "INFO")
+            except Exception as e:
+                color_print("retrying connections (%r)" % e, "INFO")
+                traceback.print_exc()
                 try_num += 1
-
-        # fall through, return False as something failed
         return connected
 
     def _reconnect(self, num_retries):
-        """
-        Reconnect to the drone (assumed the BLE crashed)
+        async def _resolve_and_connect():
+            device = await BleakScanner.find_device_by_address(self.address, timeout=10.0)
+            if device is None:
+                raise RuntimeError("Could not find BLE device %s during scan" % self.address)
+            client = BleakClient(device, address_type="random", timeout=20.0)
+            await client.connect()
+            return client
 
-        :param: num_retries is the number of times to retry
-
-        :return: True if it succeeds and False otherwise
-        """
         try_num = 1
         success = False
-        while (try_num < num_retries and not success):
+        while try_num < num_retries and not success:
             try:
                 color_print("trying to re-connect to the minidrone at address %s" % self.address, "WARN")
-                self.drone_connection.connect(self.address, "random")
+                self.client = _BleakEventLoopThread.run(_resolve_and_connect(), timeout=40)
                 color_print("connected!  Asking for services and characteristics", "SUCCESS")
                 success = True
-            except BTLEException:
-                color_print("retrying connections", "WARN")
+            except Exception as e:
+                color_print("retrying connections (%r)" % e, "WARN")
                 try_num += 1
 
-        if (success):
-            # do the magic handshake
+        if success:
             self._perform_handshake()
+
+            # ----------------------------------------------------------
+            # FIX 3: re-subscribe to the receive characteristics after a
+            # reconnect. The old code only redid the handshake, so ACKs
+            # and sensor data were silently lost after any reconnect.
+            # ----------------------------------------------------------
+            if self._notify_handler is not None:
+                for channel_uuid in self.receive_characteristics.values():
+                    try:
+                        _BleakEventLoopThread.run(
+                            self.client.start_notify(channel_uuid, self._notify_handler),
+                            timeout=10
+                        )
+                    except Exception as e:
+                        color_print("re-subscribe failed for %s: %s" % (channel_uuid, e), "WARN")
 
         return success
 
     def _connect(self):
         """
-        Connect to the minidrone to prepare for flying - includes getting the services and characteristics
-        for communication
-
-        :return: throws an error if the drone connection failed.  Returns void if nothing failed.
+        Connect to the minidrone, discover services/characteristics, do the
+        handshake, and subscribe to notifications. Raises on failure.
         """
         color_print("trying to connect to the minidrone at address %s" % self.address, "INFO")
-        self.drone_connection.connect(self.address, "random")
+
+        async def _resolve_and_connect():
+            # Resolving the device via the scanner first (rather than
+            # connecting from a bare address string) is the pattern bleak's
+            # WinRT backend expects, and lets us reliably request a "random"
+            # address type -- Parrot minidrones use a random static BLE
+            # address (bluepy's original code connected with
+            # self.drone_connection.connect(self.address, "random")). If
+            # Windows assumes "public" instead, BLE connect can hang
+            # indefinitely rather than failing, which is what caused the
+            # earlier TimeoutError with no useful message.
+            device = await BleakScanner.find_device_by_address(self.address, timeout=10.0)
+            if device is None:
+                raise RuntimeError(
+                    "Could not find BLE device %s during scan. Make sure the "
+                    "Mambo is powered on, nearby, and not already connected "
+                    "to another app/device." % self.address
+                )
+            client = BleakClient(
+                device,
+                address_type="random",
+                timeout=45.0,
+                winrt=dict(use_cached_services=False),
+            )
+            await client.connect()
+            return client
+
+        self.client = _BleakEventLoopThread.run(_resolve_and_connect(), timeout=60)
         color_print("connected!  Asking for services and characteristics", "SUCCESS")
 
-        # re-try until all services have been found
-        allServicesFound = False
+        all_services_found = False
 
-        # used for notifications
-        handle_map = dict()
+        while not all_services_found:
+            services = self.client.services
 
-        while not allServicesFound:
-            # get the services
-            self.services = self.drone_connection.getServices()
-
-            # loop through the services
-            for s in self.services:
+            for s in services:
                 hex_str = self._get_byte_str_from_uuid(s.uuid, 3, 4)
+                if hex_str not in self.service_uuids:
+                    continue
+                service_name = self.service_uuids[hex_str]
 
-                # store the characteristics for receive & send
-                if (self.service_uuids[hex_str] == 'ARCOMMAND_RECEIVING_SERVICE'):
-                    # only store the ones used to receive data
-                    for c in s.getCharacteristics():
-                        hex_str = self._get_byte_str_from_uuid(c.uuid, 4, 4)
-                        if hex_str in self.characteristic_receive_uuids:
-                            self.receive_characteristics[self.characteristic_receive_uuids[hex_str]] = c
-                            handle_map[c.getHandle()] = hex_str
+                if service_name == 'ARCOMMAND_RECEIVING_SERVICE':
+                    for c in s.characteristics:
+                        c_hex = self._get_byte_str_from_uuid(c.uuid, 4, 4)
+                        if c_hex in self.characteristic_receive_uuids:
+                            channel = self.characteristic_receive_uuids[c_hex]
+                            self.receive_characteristics[channel] = c.uuid
+                            self.uuid_to_receive_channel[c.uuid.lower()] = channel
 
+                elif service_name == 'ARCOMMAND_SENDING_SERVICE':
+                    for c in s.characteristics:
+                        c_hex = self._get_byte_str_from_uuid(c.uuid, 4, 4)
+                        if c_hex in self.characteristic_send_uuids:
+                            self.send_characteristics[self.characteristic_send_uuids[c_hex]] = c.uuid
 
-                elif (self.service_uuids[hex_str] == 'ARCOMMAND_SENDING_SERVICE'):
-                    # only store the ones used to send data
-                    for c in s.getCharacteristics():
-                        hex_str = self._get_byte_str_from_uuid(c.uuid, 4, 4)
-                        if hex_str in self.characteristic_send_uuids:
-                            self.send_characteristics[self.characteristic_send_uuids[hex_str]] = c
+                elif service_name in ('UPDATE_BLE_FTP', 'NORMAL_BLE_FTP_SERVICE'):
+                    for c in s.characteristics:
+                        c_hex = self._get_byte_str_from_uuid(c.uuid, 4, 4)
+                        if c_hex in self.characteristic_ftp_uuids:
+                            self.ftp_characteristics[self.characteristic_ftp_uuids[c_hex]] = c.uuid
 
+                # handshake characteristics: original code wrote 0x0100 to the
+                # CCCD by hand. bleak's start_notify() does that write for us,
+                # so here we just remember which characteristics need it.
+                for c in s.characteristics:
+                    full_hex = self._get_byte_str_from_uuid(c.uuid, 3, 4)
+                    if full_hex in ['fb0f', 'fb0e', 'fb1b', 'fb1c', 'fd22', 'fd23',
+                                     'fd24', 'fd52', 'fd53', 'fd54']:
+                        self.handshake_characteristics[full_hex] = c.uuid
 
-                elif (self.service_uuids[hex_str] == 'UPDATE_BLE_FTP'):
-                    # store the FTP info
-                    for c in s.getCharacteristics():
-                        hex_str = self._get_byte_str_from_uuid(c.uuid, 4, 4)
-                        if hex_str in self.characteristic_ftp_uuids:
-                            self.ftp_characteristics[self.characteristic_ftp_uuids[hex_str]] = c
-
-                elif (self.service_uuids[hex_str] == 'NORMAL_BLE_FTP_SERVICE'):
-                    # store the FTP info
-                    for c in s.getCharacteristics():
-                        hex_str = self._get_byte_str_from_uuid(c.uuid, 4, 4)
-                        if hex_str in self.characteristic_ftp_uuids:
-                            self.ftp_characteristics[self.characteristic_ftp_uuids[hex_str]] = c
-
-                # need to register for notifications and write 0100 to the right handles
-                # this is sort of magic (not in the docs!) but it shows up on the forum here
-                # http://forum.developer.parrot.com/t/minimal-ble-commands-to-send-for-take-off/1686/2
-                # Note this code snippet below more or less came from the python example posted to that forum (I adapted it to my interface)
-                for c in s.getCharacteristics():
-                    if self._get_byte_str_from_uuid(c.uuid, 3, 4) in \
-                            ['fb0f', 'fb0e', 'fb1b', 'fb1c', 'fd22', 'fd23', 'fd24', 'fd52', 'fd53', 'fd54']:
-                        self.handshake_characteristics[self._get_byte_str_from_uuid(c.uuid, 3, 4)] = c
-
-            # check to see if all 8 characteristics were found
-            allServicesFound = True
+            all_services_found = True
             for r_id in self.characteristic_receive_uuids.values():
                 if r_id not in self.receive_characteristics:
                     color_print("setting to false in receive on %s" % r_id)
-                    allServicesFound = False
+                    all_services_found = False
 
             for s_id in self.characteristic_send_uuids.values():
                 if s_id not in self.send_characteristics:
                     color_print("setting to false in send")
-                    allServicesFound = False
+                    all_services_found = False
 
             for f_id in self.characteristic_ftp_uuids.values():
                 if f_id not in self.ftp_characteristics:
                     color_print("setting to false in ftp")
-                    allServicesFound = False
+                    all_services_found = False
 
-            # and ensure all handshake characteristics were found
             if len(self.handshake_characteristics.keys()) != 10:
                 color_print("setting to false in len")
-                allServicesFound = False
+                all_services_found = False
 
-        # do the magic handshake
         self._perform_handshake()
 
-        # initialize the delegate to handle notifications
-        self.drone_connection.setDelegate(MinidroneDelegate(handle_map, self.minidrone, self))
+        # subscribe to notifications on the drone-data / ack receive channels
+        self._notify_handler = MinidroneNotifyHandler(
+            self.uuid_to_receive_channel, self.minidrone, self)
+        for channel_uuid in self.receive_characteristics.values():
+            _BleakEventLoopThread.run(
+                self.client.start_notify(channel_uuid, self._notify_handler),
+                timeout=10
+            )
 
     def _perform_handshake(self):
         """
-        Magic handshake
-        Need to register for notifications and write 0100 to the right handles
-        This is sort of magic (not in the docs!) but it shows up on the forum here
-        http://forum.developer.parrot.com/t/minimal-ble-commandsandsensors-to-send-for-take-off/1686/2
+        "Magic handshake" -- subscribe (enable notifications) on every
+        handshake characteristic. bleak's start_notify() writes the 0x0001
+        CCCD value under the hood, which is what the original bluepy code
+        did manually with writeCharacteristic(handle+2, b'\\x01\\x00').
 
-        :return: nothing
+        Note: on Windows, fd24/fd54 (FTP "handling" channels) report that
+        they don't support notifications; that warning is harmless for
+        flight -- those channels are only used for media/FTP transfers.
         """
-        color_print("magic handshake to make the drone listen to our commandsandsensors")
-
-        # Note this code snippet below more or less came from the python example posted to that forum (I adapted it to my interface)
-        for c in self.handshake_characteristics.values():
-            # for some reason bluepy characteristic handle is two lower than what I need...
-            # Need to write 0x0100 to the characteristics value handle (which is 2 higher)
-            self.drone_connection.writeCharacteristic(c.handle + 2, struct.pack("<BB", 1, 0))
+        color_print("magic handshake to make the drone listen to our commands")
+        for uuid in self.handshake_characteristics.values():
+            if uuid in self.receive_characteristics.values():
+                continue  # already subscribed above
+            try:
+                _BleakEventLoopThread.run(
+                    self.client.start_notify(uuid, lambda sender, data: None),
+                    timeout=10
+                )
+            except Exception as e:
+                color_print("handshake notify failed for %s: %s" % (uuid, e), "WARN")
 
     def disconnect(self):
         """
-        Disconnect the BLE connection.  Always call this at the end of your programs to
-        cleanly disconnect.
-
-        :return: void
+        Disconnect the BLE connection. Always call this at the end of your
+        programs to cleanly disconnect.
         """
-        self.drone_connection.disconnect()
+        if self.client is not None:
+            try:
+                _BleakEventLoopThread.run(self.client.disconnect(), timeout=10)
+            except Exception as e:
+                color_print("disconnect error (ignored): %s" % e, "WARN")
 
     def _get_byte_str_from_uuid(self, uuid, byte_start, byte_end):
-        """
-        Extract the specified byte string from the UUID btle object.  This is an ugly hack
-        but it was necessary because of the way the UUID object is represented and the documentation
-        on the byte strings from Parrot.  You give it the starting byte (counting from 1 since
-        that is how their docs count) and the ending byte and it returns that as a string extracted
-        from the UUID.  It is assumed it happens before the first - in the UUID.
-
-        :param uuid: btle UUID object
-        :param byte_start: starting byte (counting from 1)
-        :param byte_end: ending byte (counting from 1)
-        :return: string with the requested bytes (to be used as a key in the lookup tables for services)
-        """
         uuid_str = format("%s" % uuid)
         idx_start = 2 * (byte_start - 1)
-        idx_end = 2 * (byte_end)
+        idx_end = 2 * byte_end
+        return uuid_str[idx_start:idx_end]
 
-        my_hex_str = uuid_str[idx_start:idx_end]
-        return my_hex_str
-
+    # ---------------------------------------------------------------
+    # sending commands (packet formats are unchanged from the original)
+    # ---------------------------------------------------------------
 
     def send_turn_command(self, command_tuple, degrees):
-        """
-        Build the packet for turning and send it
-
-        :param command_tuple: command tuple from the parser
-        :param degrees: how many degrees to turn
-        :return: True if the command was sent and False otherwise
-        """
-        self.characteristic_send_counter['SEND_WITH_ACK'] = (self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
-
+        self.characteristic_send_counter['SEND_WITH_ACK'] = (
+            self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
         packet = struct.pack("<BBBBHh", self.data_types['DATA_WITH_ACK'],
-                             self.characteristic_send_counter['SEND_WITH_ACK'],
-                             command_tuple[0], command_tuple[1], command_tuple[2],
-                             degrees)
-
+                              self.characteristic_send_counter['SEND_WITH_ACK'],
+                              command_tuple[0], command_tuple[1], command_tuple[2],
+                              degrees)
         return self.send_command_packet_ack(packet)
 
     def send_auto_takeoff_command(self, command_tuple):
-        """
-        Build the packet for auto takeoff and send it
-
-        :param command_tuple: command tuple from the parser
-        :return: True if the command was sent and False otherwise
-        """
-        # print command_tuple
         self.characteristic_send_counter['SEND_WITH_ACK'] = (
-                                                                self.characteristic_send_counter[
-                                                                    'SEND_WITH_ACK'] + 1) % 256
+            self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
         packet = struct.pack("<BBBBHB", self.data_types['DATA_WITH_ACK'],
-                             self.characteristic_send_counter['SEND_WITH_ACK'],
-                             command_tuple[0], command_tuple[1], command_tuple[2],
-                             1)
-
+                              self.characteristic_send_counter['SEND_WITH_ACK'],
+                              command_tuple[0], command_tuple[1], command_tuple[2],
+                              1)
         return self.send_command_packet_ack(packet)
 
-
     def send_command_packet_ack(self, packet):
-        """
-        Sends the actual packet on the ack channel.  Internal function only.
-
-        :param packet: packet constructed according to the command rules (variable size, constructed elsewhere)
-        :return: True if the command was sent and False otherwise
-        """
         try_num = 0
         self._set_command_received('SEND_WITH_ACK', False)
-        while (try_num < self.max_packet_retries and not self.command_received['SEND_WITH_ACK']):
+        while try_num < self.max_packet_retries and not self.command_received['SEND_WITH_ACK']:
             color_print("sending command packet on try %d" % try_num, 2)
             self._safe_ble_write(characteristic=self.send_characteristics['SEND_WITH_ACK'], packet=packet)
-            #self.send_characteristics['SEND_WITH_ACK'].write(packet)
             try_num += 1
             color_print("sleeping for a notification", 2)
-            #notify = self.drone.waitForNotifications(1.0)
             self.smart_sleep(0.5)
-            #color_print("awake %s " % notify, 2)
-
         return self.command_received['SEND_WITH_ACK']
 
     def send_single_pcmd_command(self, command_tuple, roll, pitch, yaw, vertical_movement):
-        """
-        Send a single PCMD command with the specified roll, pitch, and yaw.  Note
-        this will not make that command run forever.  Instead it sends ONCE.  This can be used
-        in a loop (in your agent) that makes more smooth control than using the duration option.
-
-        :param command_tuple: command tuple per the parser
-        :param roll:
-        :param pitch:
-        :param yaw:
-        :param vertical_movement:
-        """
-
-        self.characteristic_send_counter['SEND_NO_ACK'] = (self.characteristic_send_counter['SEND_NO_ACK'] + 1) % 256
+        self.characteristic_send_counter['SEND_NO_ACK'] = (
+            self.characteristic_send_counter['SEND_NO_ACK'] + 1) % 256
         packet = struct.pack("<BBBBHBbbbbI", self.data_types['DATA_NO_ACK'],
-                             self.characteristic_send_counter['SEND_NO_ACK'],
-                             command_tuple[0], command_tuple[1], command_tuple[2],
-                             1, int(roll), int(pitch), int(yaw), int(vertical_movement), 0)
-
+                              self.characteristic_send_counter['SEND_NO_ACK'],
+                              command_tuple[0], command_tuple[1], command_tuple[2],
+                              1, int(roll), int(pitch), int(yaw), int(vertical_movement), 0)
         self._safe_ble_write(characteristic=self.send_characteristics['SEND_NO_ACK'], packet=packet)
-        # self.send_characteristics['SEND_NO_ACK'].write(packet)
 
     def send_pcmd_command(self, command_tuple, roll, pitch, yaw, vertical_movement, duration):
-        """
-        Send the PCMD command with the specified roll, pitch, and yaw
-
-        :param command_tuple: command tuple per the parser
-        :param roll:
-        :param pitch:
-        :param yaw:
-        :param vertical_movement:
-        :param duration:
-        """
         start_time = time.time()
-        while (time.time() - start_time < duration):
-
+        while time.time() - start_time < duration:
             self.send_single_pcmd_command(command_tuple, roll, pitch, yaw, vertical_movement)
-            notify = self.drone_connection.waitForNotifications(0.1)
+            self.smart_sleep(0.1)
 
     def send_noparam_command_packet_ack(self, command_tuple):
-        """
-        Send a command on the ack channel - where all commandsandsensors except PCMD go, per
-        http://forum.developer.parrot.com/t/ble-characteristics-of-minidrones/5912/2
-
-        the id of the last command sent (for use in ack) is the send counter (which is incremented before sending)
-
-        Ensures the packet was received or sends it again up to a maximum number of times.
-
-        :param command_tuple: 3 tuple of the command bytes.  0 padded for 4th byte
-        :return: True if the command was sent and False otherwise
-        """
-        self.characteristic_send_counter['SEND_WITH_ACK'] = (self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
-        packet = struct.pack("<BBBBH", self.data_types['DATA_WITH_ACK'], self.characteristic_send_counter['SEND_WITH_ACK'],
-                             command_tuple[0], command_tuple[1], command_tuple[2])
+        self.characteristic_send_counter['SEND_WITH_ACK'] = (
+            self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
+        packet = struct.pack("<BBBBH", self.data_types['DATA_WITH_ACK'],
+                              self.characteristic_send_counter['SEND_WITH_ACK'],
+                              command_tuple[0], command_tuple[1], command_tuple[2])
         return self.send_command_packet_ack(packet)
 
-
-
     def send_enum_command_packet_ack(self, command_tuple, enum_value, usb_id=None):
-        """
-        Send a command on the ack channel with enum parameters as well (most likely a flip).
-        All commandsandsensors except PCMD go on the ack channel per
-        http://forum.developer.parrot.com/t/ble-characteristics-of-minidrones/5912/2
-
-        the id of the last command sent (for use in ack) is the send counter (which is incremented before sending)
-
-        :param command_tuple: 3 tuple of the command bytes.  0 padded for 4th byte
-        :param enum_value: the enum index
-        :return: nothing
-        """
-        self.characteristic_send_counter['SEND_WITH_ACK'] = (self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
-        if (usb_id is None):
-            packet = struct.pack("<BBBBBBI", self.data_types['DATA_WITH_ACK'], self.characteristic_send_counter['SEND_WITH_ACK'],
-                                 command_tuple[0], command_tuple[1], command_tuple[2], 0,
-                                 enum_value)
+        self.characteristic_send_counter['SEND_WITH_ACK'] = (
+            self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
+        if usb_id is None:
+            packet = struct.pack("<BBBBBBI", self.data_types['DATA_WITH_ACK'],
+                                  self.characteristic_send_counter['SEND_WITH_ACK'],
+                                  command_tuple[0], command_tuple[1], command_tuple[2], 0,
+                                  enum_value)
         else:
-            color_print((self.data_types['DATA_WITH_ACK'], self.characteristic_send_counter['SEND_WITH_ACK'],
-                         command_tuple[0], command_tuple[1], command_tuple[2], 0, usb_id, enum_value), 1)
-            packet = struct.pack("<BBBBHBI", self.data_types['DATA_WITH_ACK'], self.characteristic_send_counter['SEND_WITH_ACK'],
-                                 command_tuple[0], command_tuple[1], command_tuple[2],
-                                 usb_id, enum_value)
+            packet = struct.pack("<BBBBHBI", self.data_types['DATA_WITH_ACK'],
+                                  self.characteristic_send_counter['SEND_WITH_ACK'],
+                                  command_tuple[0], command_tuple[1], command_tuple[2],
+                                  usb_id, enum_value)
         return self.send_command_packet_ack(packet)
 
     def send_param_command_packet(self, command_tuple, param_tuple=None, param_type_tuple=0, ack=True):
-        """
-        Send a command packet with parameters. Ack channel is optional for future flexibility,
-        but currently commands are always send over the Ack channel so it defaults to True.
-
-        Contributed by awm102 on github.  Edited by Amy McGovern to work for BLE commands also.
-
-        :param: command_tuple: the command tuple derived from command_parser.get_command_tuple()
-        :param: param_tuple (optional): the parameter values to be sent (can be found in the XML files)
-        :param: param_size_tuple (optional): a tuple of strings representing the data type of the parameters
-        e.g. u8, float etc. (can be found in the XML files)
-        :param: ack (optional): allows ack to be turned off if required
-        :return:
-        """
-        # Create lists to store the number of bytes and pack chars needed for parameters
-        # Default them to zero so that if no params are provided the packet size is correct
         param_size_list = [0] * len(param_tuple)
         pack_char_list = [0] * len(param_tuple)
 
         if param_tuple is not None:
-            # Fetch the parameter sizes. By looping over the param_tuple we only get the data
-            # for requested parameters so a mismatch in params and types does not matter
             for i, param in enumerate(param_tuple):
                 pack_char_list[i], param_size_list[i] = get_data_format_and_size(param, param_type_tuple[i])
 
@@ -515,90 +541,105 @@ class BLEConnection:
             ack_string = 'SEND_NO_ACK'
             data_ack_string = 'DATA_NO_ACK'
 
-        # Construct the base packet
-        self.characteristic_send_counter['SEND_WITH_ACK'] = (self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
+        self.characteristic_send_counter['SEND_WITH_ACK'] = (
+            self.characteristic_send_counter['SEND_WITH_ACK'] + 1) % 256
 
-        # TODO:  Amy changed this to match the BLE packet structure but needs to fully test it
         packet = struct.pack("<BBBBH", self.data_types[data_ack_string],
-                             self.characteristic_send_counter[ack_string],
-                             command_tuple[0], command_tuple[1], command_tuple[2])
+                              self.characteristic_send_counter[ack_string],
+                              command_tuple[0], command_tuple[1], command_tuple[2])
 
         if param_tuple is not None:
-            # Add in the parameter values based on their sizes
             for i, param in enumerate(param_tuple):
                 packet += struct.pack(pack_char_list[i], param)
 
-        # TODO: Fix this to not go with ack always
         return self.send_command_packet_ack(packet)
 
     def _set_command_received(self, channel, val):
-        """
-        Set the command received on the specified channel to the specified value (used for acks)
-
-        :param channel: channel
-        :param val: True or False
-        :return:
-        """
         self.command_received[channel] = val
 
     def _safe_ble_write(self, characteristic, packet):
         """
-        Write to the specified BLE characteristic but first ensure the connection is valid
-
-        :param characteristic:
-        :param packet:
-        :return:
+        FIX 2: bounded retries instead of an infinite loop. The old
+        `while not success:` version could hang forever mid-landing if BLE
+        writes started failing and reconnects kept failing too -- meaning
+        disconnect() was never reached and the drone's link-loss auto-land
+        never triggered. Now: try the write, on failure reconnect and retry,
+        give up after max_packet_retries attempts and return False.
         """
-
-        success = False
-
-        while (not success):
+        for attempt in range(self.max_packet_retries):
             try:
-                characteristic.write(packet)
-                success = True
-            except BTLEException:
-                color_print("reconnecting to send packet", "WARN")
-                self._reconnect(3)
+                _BleakEventLoopThread.run(
+                    self.client.write_gatt_char(characteristic, packet, response=False),
+                    timeout=5
+                )
+                return True
+            except Exception as e:
+                color_print("BLE write failed on attempt %d (%s)" % (attempt + 1, e), "WARN")
+                if attempt < self.max_packet_retries - 1:
+                    if not self._reconnect(3):
+                        color_print("reconnect failed, giving up on this packet", "ERROR")
+                        return False
+        return False
 
     def ack_packet(self, buffer_id, packet_id):
-        """
-        Ack the packet id specified by the argument on the ACK_COMMAND channel
-
-        :param packet_id: the packet id to ack
-        :return: nothing
-        """
-        #color_print("ack last packet on the ACK_COMMAND channel", "INFO")
-        self.characteristic_send_counter['ACK_COMMAND'] = (self.characteristic_send_counter['ACK_COMMAND'] + 1) % 256
-        packet = struct.pack("<BBB", self.data_types['ACK'], self.characteristic_send_counter['ACK_COMMAND'],
-                             packet_id)
-        #color_print("sending packet %d %d %d" % (self.data_types['ACK'], self.characteristic_send_counter['ACK_COMMAND'],
-        #                                   packet_id), "INFO")
-
+        self.characteristic_send_counter['ACK_COMMAND'] = (
+            self.characteristic_send_counter['ACK_COMMAND'] + 1) % 256
+        packet = struct.pack("<BBB", self.data_types['ACK'],
+                              self.characteristic_send_counter['ACK_COMMAND'],
+                              packet_id)
         self._safe_ble_write(characteristic=self.send_characteristics['ACK_COMMAND'], packet=packet)
-        #self.send_characteristics['ACK_COMMAND'].write(packet)
-
 
     def smart_sleep(self, timeout):
         """
-        Sleeps the requested number of seconds but wakes up for notifications
-
-        Note: NEVER use regular time.sleep!  It is a blocking sleep and it will likely
-        cause the BLE to disconnect due to dropped notifications.  Always use smart_sleep instead!
-
-        :param timeout: number of seconds to sleep
-        :return:
+        Sleeps the requested number of seconds. bleak's notification handler
+        runs on the background event-loop thread the entire time regardless
+        of what the main thread is doing, so a plain chunked sleep here does
+        not block notification handling.
         """
-
         start_time = datetime.now()
-        new_time = datetime.now()
-        diff = (new_time - start_time).seconds + ((new_time - start_time).microseconds / 1000000.0)
-
-        while (diff < timeout):
-            try:
-                notify = self.drone_connection.waitForNotifications(0.1)
-            except:
-                color_print("reconnecting to wait", "WARN")
-                self._reconnect(3)
-
+        diff = 0.0
+        while diff < timeout:
+            time.sleep(min(0.1, max(timeout - diff, 0)))
             new_time = datetime.now()
             diff = (new_time - start_time).seconds + ((new_time - start_time).microseconds / 1000000.0)
+
+
+# ---------------------------------------------------------------------
+# Scanning helper: replaces bluepy's Scanner / pyparrot's findMinidrone
+# script, which was also Linux/bluepy-only.
+# ---------------------------------------------------------------------
+
+def scan_for_minidrones(timeout=5, name_filter=None):
+    """
+    Scan for nearby BLE devices and print any that look like Parrot
+    minidrones (Mambo, Swing, etc). Returns a list of (name, address) tuples.
+
+    :param timeout: seconds to scan for
+    :param name_filter: optional substring to filter device names by
+                         (defaults to common Parrot minidrone name prefixes)
+    :return: list of (name, address)
+    """
+    prefixes = ('Mambo', 'Swing', 'Travis', 'Maclan', 'RS_')
+
+    async def _scan():
+        devices = await BleakScanner.discover(timeout=timeout)
+        found = []
+        for d in devices:
+            name = d.name or ""
+            if name_filter:
+                if name_filter in name:
+                    found.append((name, d.address))
+            elif name.startswith(prefixes):
+                found.append((name, d.address))
+        return found
+
+    results = _BleakEventLoopThread.run(_scan(), timeout=timeout + 10)
+    for name, address in results:
+        color_print("found minidrone: %s at address %s" % (name, address), "SUCCESS")
+    return results
+
+
+if __name__ == "__main__":
+    # quick manual test: python bleConnection.py
+    print("Scanning for nearby Parrot minidrones...")
+    scan_for_minidrones()
