@@ -6,9 +6,11 @@ Author: Amy McGovern
 """
 
 from pyparrot.Minidrone import Mambo
-import cv2
 
-mambo = Mambo(None, use_wifi=True) #address is None since it only works with WiFi anyway
+# Replace with your drone's address (run: python bleConnection.py to scan)
+mamboAddr = "D0:3A:8A:89:E6:21"
+mambo = Mambo(mamboAddr, use_wifi=False)
+
 print("trying to connect to mambo now")
 success = mambo.connect(num_retries=3)
 print("connected: %s" % success)
