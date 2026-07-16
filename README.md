@@ -1,6 +1,4 @@
-# pyparrot
-
-# pyparrot_windows — Windows/macOS BLE fork
+# pyparrot_windows
 
 This is a fork of [pyparrot](https://github.com/amymcgovern/pyparrot) by
 Dr. Amy McGovern (MIT License) that adds **Bluetooth (BLE) support on
