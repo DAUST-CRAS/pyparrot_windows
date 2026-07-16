@@ -1,210 +1,316 @@
-# Parrot Mambo + Python on Windows — Installation Guide
+# Programming the Parrot Mambo — Camp Tutorial
 
-*For summer camp instructors and students (ages 15+)*
+Welcome, pilot! In this tutorial you will learn to control a real drone with
+Python code. No remote control, no phone app — **your program is the pilot.**
 
-This guide gets you from a brand-new Windows laptop to flying a Parrot Mambo
-drone with Python over Bluetooth (BLE). It uses a modified version of
-[pyparrot](https://github.com/amymcgovern/pyparrot) (by Dr. Amy McGovern,
-MIT license) that replaces the Linux-only `bluepy` Bluetooth code with
-[bleak](https://github.com/hbldh/bleak), which works on Windows, macOS,
-and Linux.
+Before starting, complete the [Installation Guide](INSTALL_GUIDE.md):
+Python installed, library installed, and your drone's address found with
+`find_mambo`.
 
 ---
 
-## 1. What you need
+# Unit 1 — Getting to Know Your Mambo
 
-| Item | Details |
-|---|---|
-| A Windows laptop | Windows 10 or 11, with **Bluetooth 4.0 or newer** (almost all laptops from 2015+). A cheap USB Bluetooth 4.0+ dongle also works. |
-| A Parrot Mambo | Charged battery. Works with or without the FPV camera (this guide uses BLE, not WiFi). |
-| Python 3 | Version 3.9 or newer. |
-| This package | The modified pyparrot with Windows BLE support. |
+## Lesson 1.1 — Introduction
 
-> **Instructor tip:** label each drone and each laptop with matching numbers
-> (Drone 1 ↔ Laptop 1). Each drone has a different Bluetooth address, and
-> mixed-up pairs are the #1 source of "it doesn't connect!" during camp.
+Drones are used everywhere today: filming, delivery, agriculture,
+search-and-rescue, inspection of bridges and wind turbines. What all these
+have in common is **autonomy** — the drone follows a program, not just a
+joystick. That is exactly what you'll build this week: programs that fly.
 
----
+**Get to know your Mambo.** Find these parts on your drone:
 
-## 2. Install Python
+- **4 propellers** — two spin clockwise, two counter-clockwise (that's how
+  it steers!)
+- **Propeller guards** — always attached indoors
+- **Battery** — clips in underneath; the drone's "eyes" light up when powered
+- **Eyes (LEDs)** — also show status: steady = ready, blinking = problem or
+  low battery
+- **Accessory port** (on top) — this is where the **claw** (grab and drop
+  objects) or the **cannon** (fires small plastic balls) clips in. We'll
+  program both in Unit 3!
 
-1. Download Python from https://www.python.org/downloads/ (big yellow button).
-2. Run the installer. **IMPORTANT: tick the checkbox "Add python.exe to PATH"**
-   on the first screen before clicking Install. If you forget this, nothing
-   else in this guide will work from the command line.
-3. To verify: open **PowerShell** (press the Windows key, type `powershell`,
-   press Enter) and run:
+Each drone has a name like `Mambo_627406` and a unique Bluetooth address
+like `D0:3A:8A:89:E6:21` — check the sticker on your drone.
 
-   ```
-   python --version
-   ```
+## Lesson 1.2 — Before You Fly (Safety)
 
-   You should see something like `Python 3.12.x`. If you get
-   `'python' is not recognized`, reinstall and tick the PATH checkbox.
+A pilot's first job is safety. These rules are **not optional**:
 
----
+1. **Propeller guards on**, always, indoors.
+2. **Clear a 3×3 meter space.** Nobody inside it while flying.
+3. **Two people per flight**: one pilot (runs the code), one spotter
+   (watches the drone and calls out problems).
+4. **Never grab a flying drone.** If something goes wrong, hands off:
+   every program we write lands the drone automatically, and even if the
+   program crashes, the Mambo lands itself a few seconds after losing its
+   Bluetooth link.
+5. **Fly low first.** No big `vertical_movement` values until Unit 2 is
+   mastered.
+6. **Respect the battery.** Below ~20% the drone behaves strangely — swap
+   batteries, don't push it.
+7. Tie back long hair; keep fingers away from propellers when carrying a
+   powered drone.
 
-## 3. Install the drone software (one command)
+**Spotter's emergency procedure:** shout "LAND!", pilot presses
+`Ctrl+C` in PowerShell — our programs catch this and land immediately.
 
-Open **PowerShell** and run:
+## Lesson 1.3 — Python Is Your Controller
 
-```
-pip install https://github.com/DAUST-CRAS/pyparrot_windows/archive/refs/tags/v2.0.0-windows.zip
-```
+Other drones come with a physical remote controller. Yours doesn't need
+one: Python is your controller. Every flight program has the same skeleton —
+learn it once and you'll reuse it all week.
 
-This installs the drone library (`pyparrot`) plus everything it needs
-(`bleak` for Bluetooth, `untangle` for drone commands). No Git required,
-no compilers, no drivers, no admin rights.
+Create a file `my_first_flight.py`:
 
-To verify it worked:
+```python
+from pyparrot.Minidrone import Mambo
 
-```
-python -c "import pyparrot; print('pyparrot OK')"
-```
+# YOUR drone's address (from find_mambo — check the sticker!)
+mamboAddr = "D0:3A:8A:89:E6:21"
 
-You also need the example flight script. Your instructor will give you
-`demoMamboDirectFlight.py` (USB stick or shared drive), or you can download
-it from the GitHub page: open `examples/demoMamboDirectFlight.py`, click
-**Raw**, then press Ctrl+S to save it into a folder like
-`C:\Users\<you>\Documents\drone-camp`.
+mambo = Mambo(mamboAddr, use_wifi=False)
 
-> **Important:** run your scripts from a plain folder like `drone-camp` —
-> NOT from inside a downloaded copy of the pyparrot source code. If your
-> script's folder contains a `pyparrot` subfolder, Python will use that
-> copy instead of the one you just installed.
+print("trying to connect")
+success = mambo.connect(num_retries=3)
+print("connected: %s" % success)
 
----
+if success:
+    try:
+        # let the drone wake up and send us its status
+        mambo.smart_sleep(2)
+        mambo.ask_for_state_update()
+        mambo.smart_sleep(2)
 
-## 4. Turn on Bluetooth and prepare the drone
+        print("taking off!")
+        mambo.safe_takeoff(5)
 
-1. On the laptop: **Settings → Bluetooth & devices → Bluetooth: On.**
-   Do **NOT** "pair" the drone in Windows settings — the Python code
-   connects directly. Pairing in Windows can actually cause problems.
-2. On the drone: install a charged battery. The eyes/lights should glow.
-3. **Close the Parrot FreeFlight phone app** and turn off Bluetooth on any
-   phone that has connected to this drone before. A Mambo only accepts ONE
-   connection at a time — if a phone grabs it first, Python cannot connect.
+        # ============================
+        #  YOUR FLIGHT CODE GOES HERE
+        # ============================
+        mambo.smart_sleep(3)   # for now: just hover for 3 seconds
 
----
+    except KeyboardInterrupt:
+        print("Emergency stop requested!")
 
-## 5. Find your drone's Bluetooth address
-
-Every drone has a unique address that looks like `D0:3A:60:8B:E6:5A`.
-You need it once per drone — write it on a sticker on the drone!
-
-With the drone powered on, run the scanner (installed automatically in
-step 3 — works from any folder):
-
-```
-find_mambo
-```
-
-Expected output:
-
-```
-Scanning for nearby Parrot minidrones (5 seconds)...
- found minidrone: Mambo_596940 at address D0:3A:60:8B:E6:5A
+    finally:
+        print("landing")
+        mambo.safe_land(5)
+        mambo.smart_sleep(2)
+        print("disconnect")
+        mambo.disconnect()
 ```
 
-Copy the address exactly, including the colons.
+Run it (drone on the floor, space clear, spotter ready):
 
-**If nothing is found:**
-- Is the drone's battery charged and clicked in? (eyes lit?)
-- Is another phone/laptop already connected to it? (see step 4.3)
-- Is laptop Bluetooth actually on?
-- Move the drone within 1–2 meters of the laptop and scan again.
-- Multiple drones in the room? They all appear at once — match the
-  `Mambo_XXXXXX` name to the sticker under each drone.
+```
+python my_first_flight.py
+```
 
-> **Note:** the address printed by the scanner is the one to use, even if
-> a different number is printed on the drone itself.
+**Understanding the skeleton:**
 
----
+- `connect(num_retries=3)` — opens the Bluetooth link, tries 3 times
+- `smart_sleep(seconds)` — the drone's version of waiting. **Always use
+  this, never `time.sleep()`** — smart_sleep keeps listening to the drone
+  while waiting.
+- `safe_takeoff(5)` / `safe_land(5)` — take off / land, waiting up to 5
+  seconds for the drone to confirm it happened
+- `try / except KeyboardInterrupt / finally` — the safety net: whatever
+  happens (your code crashes, or someone presses Ctrl+C), the `finally`
+  block **always** runs and lands the drone. Every program you write this
+  week must keep this structure.
 
-## 6. First test flight
+## Lesson 1.4 — Troubleshooting
 
-1. Open `demoMamboDirectFlight.py` (in your `drone-camp` folder) in a text
-   editor (Notepad, VS Code, ...).
-2. Replace the address at the top with YOUR drone's address:
+Things go wrong for every programmer — debugging is a pilot skill too.
 
-   ```python
-   mamboAddr = "D0:3A:60:8B:E6:5A"   # <- your address here
-   ```
-
-3. Put the drone on the floor, in a clear space, propeller guards ON.
-4. In PowerShell, go to your folder and run it:
-
-   ```
-   cd C:\Users\<you>\Documents\drone-camp
-   python demoMamboDirectFlight.py
-   ```
-
-The drone should take off, hover, drift forward gently, and land.
-Watch the console — you should see
-`Flying state before takeoff: landed`. If it says `unknown`, see
-Troubleshooting below.
-
----
-
-## 7. Safety rules (non-negotiable for camp)
-
-- **Propeller guards always on.** No exceptions indoors.
-- Clear a 3×3 meter space. Nobody inside it during flight.
-- Fly LOW first (default hover height is fine). No `vertical_movement`
-  greater than 20 until students are experienced.
-- One person flies, one person watches (the "spotter" calls out problems).
-- **Never grab a flying drone.** If something goes wrong: the program's
-  landing sequence runs automatically, and closing the program
-  (Ctrl+C, then let the script finish) still lands the drone —
-  the Mambo auto-lands a few seconds after losing its Bluetooth link.
-- Hair tied back, fingers away from propellers when carrying a powered drone.
-- Low battery = weird behavior. Swap batteries at ~20%, don't push it.
+- **Install/connection problems** (ModuleNotFoundError, drone not found,
+  `Connected: False`): see the [Installation Guide troubleshooting
+  table](INSTALL_GUIDE.md#troubleshooting).
+- **`handshake notify failed for ...fd24/fd54`** when connecting:
+  harmless, ignore it.
+- **Drone connects but won't take off:** battery too low, or the drone is
+  not flat — place it on level ground. The eyes blink when the battery is
+  low.
+- **Drone drifts on its own while hovering:** land, place it perfectly flat
+  and still, then add `mambo.flat_trim()` right after `ask_for_state_update`
+  — this recalibrates its sense of "level".
+- **The program froze:** `Ctrl+C`. Our skeleton catches it and lands.
+- **Golden debugging rule:** read the error message *bottom line first* —
+  Python tells you exactly what it didn't like.
 
 ---
 
-## 8. Troubleshooting
+# Unit 2 — Flying with Code
 
-| Symptom | Fix |
-|---|---|
-| `'python' is not recognized` | Reinstall Python with "Add to PATH" ticked, then close and reopen PowerShell. |
-| `ModuleNotFoundError: No module named 'bleak'` (or 'pyparrot') | Re-run the install command from section 3 in the same PowerShell where you run the scripts. |
-| `ModuleNotFoundError: No module named 'zeroconf'` | You installed an old version of this package. Re-run the install command from section 3 (v2.0.0-windows or later includes it automatically). |
-| `AttributeError: 'project' has no attribute 'myclass'` | Old/broken XML command files. Re-run the install command from section 3 with `--force-reinstall` added at the end. |
-| Scanner finds nothing | Battery in and charged? Phone app closed? Bluetooth on? Drone within 2 m? |
-| `Connected: False` after 3 tries | Power-cycle the drone (remove/reinsert battery), wait 10 s, retry. Make sure no phone is connected. |
-| `handshake notify failed for ...fd24 / ...fd54` | **Harmless.** These are camera/file-transfer channels Windows can't subscribe to. Flight is unaffected. |
-| `unknown channel for sender ...` spam | You are running an OLD `bleConnection.py`. Make sure the fixed file from this package is in `pyparrot/networking/`. |
-| `Flying state before takeoff: unknown` | Same as above — the fixed file isn't being used, or the drone needs a power-cycle. |
-| Drone won't land | The script sends multiple layers of land commands; as a last resort it disconnects, and the drone auto-lands on link loss. If truly stuck, remove yourself from under it and wait — it lands when the link drops. |
-| Two students' laptops fight over one drone | One connection at a time. Match sticker numbers (see instructor tip in section 1). |
+## Lesson 2.1 — Moving: fly_direct
 
----
-
-## 9. What to try next
-
-Once the demo works, students can edit the middle section of the script:
+One command moves the drone in any direction:
 
 ```python
 mambo.fly_direct(roll=0, pitch=10, yaw=0, vertical_movement=0, duration=1)
 ```
 
-- `pitch` = forward/backward (−100..100)
-- `roll` = left/right lean (−100..100)
-- `yaw` = rotate (−100..100)
-- `vertical_movement` = up/down (−100..100)
-- `duration` = seconds
+| Parameter | What it does | Range |
+|---|---|---|
+| `pitch` | forward (+) / backward (−) | −100 to 100 |
+| `roll` | slide right (+) / left (−) | −100 to 100 |
+| `yaw` | rotate right (+) / left (−) | −100 to 100 |
+| `vertical_movement` | up (+) / down (−) | −100 to 100 |
+| `duration` | how long, in seconds | |
 
-Keep values small (±10 to ±25) indoors. `mambo.turn_degrees(90)` and
-`mambo.flip(direction="front")` are fun next steps — flips need fresh
-batteries and ceiling clearance!
+The numbers are **percentages of maximum power** — and 100% is *very* fast.
+Indoors, stay between **10 and 25**.
 
-Full API documentation: https://pyparrot.readthedocs.io
+Drop these into the skeleton's "YOUR FLIGHT CODE" zone, one at a time:
+
+```python
+print("forward")
+mambo.fly_direct(roll=0, pitch=10, yaw=0, vertical_movement=0, duration=1)
+mambo.smart_sleep(1)
+
+print("backward")
+mambo.fly_direct(roll=0, pitch=-10, yaw=0, vertical_movement=0, duration=1)
+mambo.smart_sleep(1)
+
+print("slide right")
+mambo.fly_direct(roll=10, pitch=0, yaw=0, vertical_movement=0, duration=1)
+mambo.smart_sleep(1)
+
+print("up")
+mambo.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=30, duration=1)
+mambo.smart_sleep(1)
+```
+
+**Why the `smart_sleep(1)` between moves?** It lets the drone stabilize —
+without it, moves blur together and the drone wobbles.
+
+**Experiment:** you can mix parameters in ONE command. What shape does this
+fly?
+
+```python
+mambo.fly_direct(roll=15, pitch=0, yaw=50, vertical_movement=0, duration=2)
+```
+
+## Lesson 2.2 — Precise Turns: turn_degrees
+
+`yaw` rotates by *power and time* — imprecise. For exact angles:
+
+```python
+mambo.turn_degrees(90)     # quarter turn right
+mambo.smart_sleep(2)
+mambo.turn_degrees(-90)    # quarter turn left
+mambo.smart_sleep(2)
+mambo.turn_degrees(180)    # about-face
+```
+
+## Lesson 2.3 — Challenges
+
+Time to earn your wings. For each challenge, plan the moves on paper first —
+real pilots plan before they fly.
+
+**Challenge 1 — The Square 🟨**
+Fly a square: forward, quarter turn, forward, quarter turn... back to start,
+facing the way you began.
+*Hint: a `for` loop makes this 4 lines instead of 16.*
+
+```python
+for side in range(4):
+    mambo.fly_direct(roll=0, pitch=15, yaw=0, vertical_movement=0, duration=1)
+    mambo.smart_sleep(1)
+    mambo.turn_degrees(90)
+    mambo.smart_sleep(2)
+```
+
+**Challenge 2 — The Elevator 🛗**
+Take off, rise for 1 second, descend for 1 second, land. Smooth, no wobble.
+
+**Challenge 3 — The Compass 🧭**
+Face each of the 4 directions in turn, hovering 2 seconds at each, using
+`turn_degrees`.
+
+**Challenge 4 — Free Design ✏️**
+Invent a 15-second routine: draw the path on paper, write it, fly it.
+Bonus style points if it ends exactly where it started.
+
+**Challenge 5 — The Flip 🤸 (instructor permission required)**
+Fresh battery, high ceiling, extra clear space:
+
+```python
+mambo.flip(direction="front")   # also: "back", "left", "right"
+mambo.smart_sleep(3)
+```
 
 ---
 
-## Credits & license
+# Unit 3 — Accessories and Sensors
 
-- Original pyparrot: Dr. Amy McGovern — https://github.com/amymcgovern/pyparrot (MIT License)
-- Windows/macOS BLE port: based on bleak — https://github.com/hbldh/bleak (MIT License)
-- This modified version is distributed under the same MIT License.
-  See the LICENSE file. No warranty: fly responsibly, test before class.
+## Lesson 3.1 — The Claw 🦾
+
+Clip the claw accessory onto the top port. The claw can grab and release
+light objects — the classic mission: pick up a small ball, fly it across
+the room, drop it in a cup.
+
+```python
+print("open and close the claw")
+mambo.open_claw()
+mambo.smart_sleep(5)   # the claw needs time to move — always sleep after!
+
+mambo.close_claw()
+mambo.smart_sleep(5)
+```
+
+**Mission — Air Delivery 📦:** place an object in the open claw, close it,
+take off, fly to a target 2 meters away, land, open the claw. Full points
+if the object ends up inside the target zone.
+
+## Lesson 3.2 — The Cannon 🎯
+
+Clip on the cannon accessory (fires soft plastic balls — **never aim at
+people or animals**; set up a paper target).
+
+The cannon works even without flying:
+
+```python
+print("fire!")
+mambo.fire_gun()
+mambo.smart_sleep(10)   # firing takes time — sleep before the next command
+```
+
+**Mission — Target Practice:** take off, hover, turn to face the paper
+target, fire, land. Teams score by hits out of 3 balls.
+
+## Lesson 3.3 — Reading Sensors
+
+Your drone talks back! After `ask_for_state_update()`, the `mambo.sensors`
+object holds live data:
+
+```python
+print("battery: %s%%" % mambo.sensors.battery)
+print("flying state: %s" % mambo.sensors.flying_state)
+```
+
+`flying_state` is one of: `landed`, `takingoff`, `hovering`, `flying`,
+`landing`, `emergency`.
+
+**Smart pilot upgrade:** make your program refuse to take off when the
+battery is weak. Add this before `safe_takeoff`:
+
+```python
+if mambo.sensors.battery < 30:
+    print("Battery too low to fly safely: %s%%" % mambo.sensors.battery)
+else:
+    mambo.safe_takeoff(5)
+    # ... rest of the flight ...
+```
+
+## Lesson 3.4 — Final Project 🏆
+
+You now have everything you need: the safety skeleton, movement commands,
+precise turns, accessories, and sensors. Your final mission will be
+announced by your instructors — get ready to combine it all.
+
+---
+
+*Happy flying! Fork of [pyparrot](https://github.com/amymcgovern/pyparrot)
+by Dr. Amy McGovern — full API reference at https://pyparrot.readthedocs.io*
