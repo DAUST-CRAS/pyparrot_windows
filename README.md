@@ -36,4 +36,4 @@ python -m pip install -e .
 
 ## Getting Started
 
-Get started by following the [turotial and Code Guide](turotial.md).
+Get started by following the [turotial and Code Guide](tutorial.md).
